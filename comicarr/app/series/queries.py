@@ -13,7 +13,7 @@ Series domain queries — comics, issues, annuals, importresults tables.
 Uses SQLAlchemy Core via the existing db module.
 """
 
-from sqlalchemy import and_, case, delete, func, literal, or_, select
+from sqlalchemy import and_, case, delete, func, literal, or_, select, update
 
 from comicarr import db
 from comicarr.app.core.database import paginated_query  # noqa: F401 — re-exported
@@ -294,6 +294,46 @@ def ignore_issue(issue_id, audit_identity):
         explicit_intent_values(AcquisitionIntent.IGNORED, audit_identity),
         {"IssueID": issue_id},
     )
+
+
+def find_issue_status_target(issue_id, entity_type=None):
+    """Resolve an issue id to its table ('issues' or 'annuals'), or None."""
+    normalized = str(entity_type or "").strip().lower()
+    if normalized not in ("", "issue", "annual"):
+        return None
+    if normalized in ("", "issue"):
+        row = db.select_one(select(t_issues.c.IssueID).where(t_issues.c.IssueID == str(issue_id)))
+        if row is not None or normalized == "issue":
+            return "issues" if row is not None else None
+    row = db.select_one(
+        select(t_annuals.c.IssueID).where(
+            t_annuals.c.IssueID == str(issue_id),
+            or_(t_annuals.c.Deleted.is_(None), t_annuals.c.Deleted != 1),
+        )
+    )
+    return "annuals" if row is not None else None
+
+
+def set_issue_status(issue_id, status, audit_identity, *, table):
+    """Apply one operator status set to an issue or annual row.
+
+    Wanted/Skipped/Ignored are explicit acquisition intent and dual-write both
+    columns. Archived is fulfillment evidence, not intent, so it writes Status
+    only — the same shape updater.py uses when it archives a missing file.
+    """
+    if status == "Archived":
+        values = {"Status": "Archived"}
+    else:
+        from comicarr.app.acquisition.models import AcquisitionIntent
+        from comicarr.app.acquisition.policy import explicit_intent_values
+
+        values = explicit_intent_values(AcquisitionIntent(str(status).lower()), audit_identity)
+    target = {"issues": t_issues, "annuals": t_annuals}[table]
+    stmt = update(target).where(target.c.IssueID == str(issue_id))
+    if table == "annuals":
+        stmt = stmt.where(or_(target.c.Deleted.is_(None), target.c.Deleted != 1))
+    with db.get_engine().begin() as conn:
+        return conn.execute(stmt.values(**values)).rowcount == 1
 
 
 def get_wanted_issues(limit=None, offset=None, search=None):
