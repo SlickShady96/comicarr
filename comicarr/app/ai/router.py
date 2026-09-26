@@ -11,6 +11,7 @@
 AI domain router — status, connection testing, activity feed, library chat.
 """
 
+import asyncio
 import json
 
 from fastapi import APIRouter, Depends, Request
@@ -267,3 +268,27 @@ async def ai_suggestions():
 
     suggestions = get_cached_suggestions()
     return JSONResponse(content={"suggestions": suggestions})
+
+
+@router.get("/recommendations", dependencies=[Depends(require_session)])
+async def ai_recommendations():
+    """Return cached AI-generated series recommendations."""
+    from comicarr.app.ai.recommendations import get_cached_recommendations
+
+    recommendations = get_cached_recommendations()
+    return JSONResponse(content={"recommendations": recommendations})
+
+
+@router.post("/recommendations/refresh", dependencies=[Depends(require_session)])
+async def ai_recommendations_refresh():
+    """Regenerate series recommendations on demand."""
+    from comicarr.app.ai.recommendations import RecommendationGenerationError, generate_recommendations
+
+    try:
+        recommendations = await asyncio.to_thread(generate_recommendations, force=True)
+    except RecommendationGenerationError as e:
+        message = (
+            "AI request or token limit reached" if e.status_code == 429 else "Recommendation generation unavailable"
+        )
+        return JSONResponse(status_code=e.status_code, content={"error": message})
+    return JSONResponse(content={"recommendations": recommendations})
