@@ -61,6 +61,8 @@ export type {
   ArcIssueStatus,
   StoryArc,
   ArcIssue,
+  MissingArcSeries,
+  ResolvedArcSeries,
   StoryArcDetail,
   ArcSearchResult,
 } from "./entities";
