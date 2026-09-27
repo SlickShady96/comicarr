@@ -44,7 +44,9 @@ describe("SearchPage result views", () => {
       screen.getByRole("button", { name: "Add Amazing Spider-Man" }),
     ).toBeTruthy();
     // A series already in the library keeps its added state on the card.
-    expect(screen.getByRole("button", { name: /added/ })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Spider-Man: Miles Morales added" }),
+    ).toBeTruthy();
     expect(localStorage.getItem(SEARCH_VIEW_KEY)).toBe("grid");
   });
 

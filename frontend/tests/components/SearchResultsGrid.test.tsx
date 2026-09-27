@@ -95,4 +95,39 @@ describe("SearchResultsGrid", () => {
       "https://cv.example/thumb.jpg",
     );
   });
+
+  it("starts a fresh cover attempt when a result's cover changes", () => {
+    const saga = {
+      comicid: "c-1",
+      name: "Saga",
+      comicimage: "https://cv.example/large.jpg",
+      comicthumb: "https://cv.example/thumb.jpg",
+    } as SearchResult;
+    const { rerender } = render(
+      <SearchResultsGrid contentType="comic" results={[saga]} />,
+    );
+
+    // The large cover fails, so the card falls back to the thumbnail.
+    fireEvent.error(screen.getByRole("img", { name: "Saga" }));
+    expect(screen.getByRole("img", { name: "Saga" }).getAttribute("src")).toBe(
+      "https://cv.example/thumb.jpg",
+    );
+
+    // Same series, new covers: the new large cover is tried first again.
+    rerender(
+      <SearchResultsGrid
+        contentType="comic"
+        results={[
+          {
+            ...saga,
+            comicimage: "https://cv.example/large-v2.jpg",
+            comicthumb: "https://cv.example/thumb-v2.jpg",
+          },
+        ]}
+      />,
+    );
+    const img = screen.getByRole("img", { name: "Saga" });
+    expect(img.getAttribute("src")).toBe("https://cv.example/large-v2.jpg");
+    expect(img.className).toContain("opacity-0");
+  });
 });

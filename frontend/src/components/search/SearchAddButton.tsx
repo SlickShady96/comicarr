@@ -106,6 +106,7 @@ export default function SearchAddButton({
       <button
         type="button"
         disabled
+        aria-label={`${comic.name} added`}
         className={base}
         style={{
           borderColor: "var(--border)",
@@ -123,6 +124,7 @@ export default function SearchAddButton({
       <button
         type="button"
         disabled
+        aria-label={`Adding ${comic.name}`}
         className={base}
         style={{
           borderColor: "var(--border)",

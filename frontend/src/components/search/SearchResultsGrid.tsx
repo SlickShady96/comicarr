@@ -46,10 +46,6 @@ function SearchResultCard({
   const coverCandidates = [
     ...new Set([getCardCoverUrl(comic), getCoverUrl(comic)]),
   ].filter((url): url is string => !!url);
-  const [failedCount, setFailedCount] = useState(0);
-  const [isLoaded, setIsLoaded] = useState(false);
-
-  const imageUrl = coverCandidates[failedCount];
   const description = getDescription(comic);
   const sourceLabel = SOURCE_LABELS[comic.metadata_source ?? ""] ?? null;
   const issues = knownCount(comic.issues ?? comic.count_of_issues);
@@ -69,22 +65,13 @@ function SearchResultCard({
       className="bg-card rounded-lg border overflow-hidden flex flex-col h-full"
     >
       <div className="aspect-[2/3] bg-muted relative overflow-hidden shrink-0">
-        {imageUrl ? (
-          <img
-            src={imageUrl}
-            alt={comic.name}
-            className={`w-full h-full object-cover transition-opacity duration-200 ${
-              isLoaded ? "opacity-100" : "opacity-0"
-            }`}
-            loading="lazy"
-            onLoad={() => setIsLoaded(true)}
-            onError={() => setFailedCount((n) => n + 1)}
-          />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center text-muted-foreground/50">
-            <ImageOff className="w-8 h-8" />
-          </div>
-        )}
+        {/* Keyed by its candidates so new cover URLs start a fresh attempt
+            instead of inheriting the previous fallback position. */}
+        <CardCover
+          key={coverCandidates.join("|")}
+          candidates={coverCandidates}
+          alt={comic.name}
+        />
 
         {sourceLabel && (
           <span
@@ -150,5 +137,32 @@ function SearchResultCard({
         />
       </div>
     </div>
+  );
+}
+
+function CardCover({ candidates, alt }: { candidates: string[]; alt: string }) {
+  const [failedCount, setFailedCount] = useState(0);
+  const [loadedUrl, setLoadedUrl] = useState<string | null>(null);
+
+  const imageUrl = candidates[failedCount];
+  if (!imageUrl) {
+    return (
+      <div className="w-full h-full flex items-center justify-center text-muted-foreground/50">
+        <ImageOff className="w-8 h-8" />
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={imageUrl}
+      alt={alt}
+      className={`w-full h-full object-cover transition-opacity duration-200 ${
+        loadedUrl === imageUrl ? "opacity-100" : "opacity-0"
+      }`}
+      loading="lazy"
+      onLoad={() => setLoadedUrl(imageUrl)}
+      onError={() => setFailedCount((n) => n + 1)}
+    />
   );
 }
