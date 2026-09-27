@@ -1154,7 +1154,7 @@ def new_pullcheck(weeknumber, pullyear, comic1off_name=None, comic1off_id=None, 
                                 + " not a match based on issue number comparison [LatestIssue:"
                                 + latestiss
                                 + "][MatchIssue:"
-                                + week["Issue"]
+                                + week["issue"]
                                 + "]"
                             )
                             continue
