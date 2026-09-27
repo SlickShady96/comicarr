@@ -151,6 +151,20 @@ def test_pull_week_stores_nothing_when_a_page_fails(cv_config, stored, monkeypat
     assert stored == []
 
 
+def test_pull_week_stores_nothing_when_the_page_cap_cuts_the_week_short(cv_config, stored, monkeypatch):
+    # Saving a truncated week would replace a complete saved pull list.
+    def pulldetails(comicid, rtype, offset=0, **_kwargs):
+        return _page([_issue(offset + 1, 10, "1")], 10_000, offset)
+
+    monkeypatch.setattr(cv_source, "MAX_PAGES", 3)
+    monkeypatch.setattr(cv_source.cv, "pulldetails", pulldetails)
+
+    result = cv_source.pull_week(39, 2026, "2026-09-30")
+
+    assert result["status"] == "failure"
+    assert stored == []
+
+
 def test_pull_week_without_an_api_key_never_calls_comicvine(cv_config, stored, monkeypatch):
     cv_config.COMICVINE_API = None
     pulldetails = MagicMock()

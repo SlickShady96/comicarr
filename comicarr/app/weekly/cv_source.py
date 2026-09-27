@@ -48,7 +48,8 @@ def week_bounds(midweek: str) -> tuple[str, str]:
 
 
 def _fetch_all(rtype: str, **kwargs) -> list[dict] | None:
-    """Every result of a paged ComicVine JSON request, or None if a page failed."""
+    """Every result of a paged ComicVine JSON request, or None if any page failed
+    or the page cap cut it short. A partial week must never replace saved rows."""
     results: list[dict] = []
     offset = 0
     for _ in range(MAX_PAGES):
@@ -62,8 +63,10 @@ def _fetch_all(rtype: str, **kwargs) -> list[dict] | None:
         offset += len(page)
         if not page or offset >= int(response.get("number_of_total_results") or 0):
             return results
-    logger.warn("[PULL-LIST] ComicVine %s returned more than %s pages; using what arrived" % (rtype, MAX_PAGES))
-    return results
+    logger.warn(
+        "[PULL-LIST] ComicVine %s returned more than %s pages; discarding the incomplete result" % (rtype, MAX_PAGES)
+    )
+    return None
 
 
 def _fetch_volumes(volume_ids: list[str]) -> dict[str, dict] | None:
