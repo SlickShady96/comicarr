@@ -11,15 +11,38 @@
 AI client factory — creates OpenAI-compatible sync and async clients.
 
 Validates configuration before constructing clients:
-  - base URL must use http or https (https required for non-localhost)
+  - base URL must use http or https (https required unless the host is
+    loopback, a private network address, or a single-label container name)
   - API key must not be an undecrypted Fernet token (starts with gAAAAA)
 """
 
+import ipaddress
 from urllib.parse import urlparse
 
 from openai import AsyncOpenAI, OpenAI
 
 from comicarr import logger
+
+_PRIVATE_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+
+
+def _is_local_host(hostname):
+    """True for hosts that may be reached over plain http.
+
+    Loopback, the RFC 1918 private ranges, and single-label names such as
+    Docker service names (``omniroute``, ``ollama``).
+    """
+    if hostname == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        return bool(hostname) and "." not in hostname
+    return ip.is_loopback or any(ip in net for net in _PRIVATE_NETWORKS)
 
 
 def create_ai_clients(config):
@@ -42,12 +65,11 @@ def create_ai_clients(config):
         logger.error("[AI-CLIENT] AI_BASE_URL must use http or https, got: %s" % parsed.scheme)
         return (None, None)
 
-    hostname = parsed.hostname or ""
-    is_local = (
-        hostname in ("localhost", "127.0.0.1", "::1") or hostname.startswith("192.168.") or hostname.startswith("10.")
-    )
-    if parsed.scheme != "https" and not is_local:
-        logger.error("[AI-CLIENT] AI_BASE_URL requires https for non-local hosts: %s" % base_url)
+    if parsed.scheme != "https" and not _is_local_host(parsed.hostname or ""):
+        logger.error(
+            "[AI-CLIENT] AI_BASE_URL requires https unless the host is localhost, a private network address "
+            "(10.x, 172.16-31.x, 192.168.x) or a single-label container name: %s" % base_url
+        )
         return (None, None)
 
     if api_key.startswith("gAAAAA"):

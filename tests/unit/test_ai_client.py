@@ -143,3 +143,62 @@ class TestCreateAiClients:
         sync_client, async_client = create_ai_clients(config)
         assert sync_client is not None
         assert async_client is not None
+
+
+def _clients_for(base_url):
+    from comicarr.app.ai.client import create_ai_clients
+
+    config = _MockConfig(AI_BASE_URL=base_url, AI_API_KEY="sk-test-key", AI_MODEL="llama3")
+    return create_ai_clients(config)
+
+
+class TestPlainHttpHosts:
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:11434/v1",
+            "http://[::1]:11434/v1",
+            "http://10.0.0.5:11434/v1",
+            "http://192.168.1.20:11434/v1",
+            "http://172.16.0.1:11434/v1",
+            "http://172.20.0.3:4000/v1",
+            "http://172.31.255.254:4000/v1",
+            "http://omniroute:20128/v1",
+            "http://ollama:11434/v1",
+        ],
+    )
+    @patch("comicarr.app.ai.client.OpenAI")
+    @patch("comicarr.app.ai.client.AsyncOpenAI")
+    def test_local_private_and_container_hosts_accepted(self, mock_async, mock_sync, base_url):
+        sync_client, async_client = _clients_for(base_url)
+        assert sync_client is not None
+        assert async_client is not None
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "http://172.15.255.255:4000/v1",
+            "http://172.32.0.1:4000/v1",
+            "http://8.8.8.8/v1",
+            "http://api.openai.com/v1",
+            "http://ollama.example.com:11434/v1",
+            "http://10.example.com/v1",
+            "http://192.168.evil.com/v1",
+        ],
+    )
+    def test_public_hosts_rejected_over_http(self, base_url):
+        sync_client, async_client = _clients_for(base_url)
+        assert sync_client is None
+        assert async_client is None
+
+    @pytest.mark.parametrize(
+        "base_url",
+        ["https://api.openai.com/v1", "https://172.32.0.1/v1", "https://omniroute:20128/v1"],
+    )
+    @patch("comicarr.app.ai.client.OpenAI")
+    @patch("comicarr.app.ai.client.AsyncOpenAI")
+    def test_https_unaffected(self, mock_async, mock_sync, base_url):
+        sync_client, async_client = _clients_for(base_url)
+        assert sync_client is not None
+        assert async_client is not None
