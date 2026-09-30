@@ -1,6 +1,11 @@
 import { useState, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Search as SearchIcon, Settings } from "lucide-react";
+import {
+  LayoutGrid,
+  LayoutList,
+  Search as SearchIcon,
+  Settings,
+} from "lucide-react";
 import FilterField from "@/components/ui/FilterField";
 import {
   Select,
@@ -12,11 +17,25 @@ import {
 import { useSearchComics, useSearchManga } from "@/hooks/useSearch";
 import { useContentSources } from "@/hooks/useContentSources";
 import SearchResultsTable from "@/components/search/SearchResultsTable";
+import SearchResultsGrid from "@/components/search/SearchResultsGrid";
 import { Skeleton } from "@/components/ui/skeleton";
 import EmptyState from "@/components/ui/EmptyState";
 import PageHeader, { Tab, TabRow } from "@/components/layout/PageHeader";
 import { DataTableFooter } from "@/components/data-table/DataTableFooter";
 import type { ContentType } from "@/types/entities";
+
+const SEARCH_VIEW_KEY = "comicarr-search-view";
+
+type SearchView = "list" | "grid";
+
+function readSavedView(): SearchView {
+  try {
+    return localStorage.getItem(SEARCH_VIEW_KEY) === "grid" ? "grid" : "list";
+  } catch {
+    // Blocked storage falls back to list.
+    return "list";
+  }
+}
 
 interface SortOption {
   value: string;
@@ -75,6 +94,10 @@ export default function SearchPage() {
   const urlQuery = searchParams.get("q") || "";
   const urlPage = parseInt(searchParams.get("page") || "1") || 1;
   const urlSort = searchParams.get("sort") || "relevance";
+  const rawView = searchParams.get("view");
+  const view: SearchView =
+    rawView === "grid" || rawView === "list" ? rawView : readSavedView();
+  const isGridView = view === "grid";
 
   const rawType = searchParams.get("type");
   const urlType: ContentType | null =
@@ -126,6 +149,7 @@ export default function SearchPage() {
         page: "1",
         sort: urlSort,
         type: searchMode,
+        view,
       });
     }
   };
@@ -137,6 +161,7 @@ export default function SearchPage() {
       type: newMode,
       sort: newSort,
       page: "1",
+      view,
     };
     if (urlQuery) params.q = urlQuery;
     setSearchParams(params);
@@ -154,6 +179,17 @@ export default function SearchPage() {
     params.sort = value;
     params.page = "1";
     setSearchParams(params);
+  };
+
+  const handleViewChange = (newView: SearchView) => {
+    try {
+      localStorage.setItem(SEARCH_VIEW_KEY, newView);
+    } catch {
+      // Blocked storage must not stop the view change.
+    }
+    const params: Record<string, string> = Object.fromEntries(searchParams);
+    params.view = newView;
+    setSearchParams(params, { replace: true });
   };
 
   const totalPages = pagination
@@ -229,6 +265,34 @@ export default function SearchPage() {
           </div>
         )}
         <div className="ml-auto flex items-center gap-2">
+          <div className="inline-flex shrink-0 rounded-md border border-border overflow-hidden">
+            <button
+              type="button"
+              onClick={() => handleViewChange("list")}
+              aria-pressed={!isGridView}
+              className={`px-2 py-1.5 transition-colors ${
+                !isGridView
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+              aria-label="List view"
+            >
+              <LayoutList className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => handleViewChange("grid")}
+              aria-pressed={isGridView}
+              className={`px-2 py-1.5 border-l border-border transition-colors ${
+                isGridView
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+              aria-label="Grid view"
+            >
+              <LayoutGrid className="w-3.5 h-3.5" />
+            </button>
+          </div>
           <span className="font-mono text-[10px] tracking-[0.1em] uppercase text-muted-foreground">
             sort
           </span>
@@ -250,13 +314,24 @@ export default function SearchPage() {
 
       {/* Results area — full-bleed, and the only thing that scrolls. */}
       <div ref={resultsRef} className="flex-1 min-h-0 overflow-auto">
-        {isLoading && (
-          <div className="p-5 space-y-2">
-            {[0, 1, 2, 3, 4].map((i) => (
-              <Skeleton key={i} className="h-14" />
-            ))}
-          </div>
-        )}
+        {isLoading &&
+          (isGridView ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 px-5 py-4">
+              {[...Array(12)].map((_, i) => (
+                <div key={i} className="space-y-2">
+                  <Skeleton className="aspect-[2/3] w-full rounded-lg" />
+                  <Skeleton className="h-4 w-3/4" />
+                  <Skeleton className="h-3 w-1/2" />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="p-5 space-y-2">
+              {[0, 1, 2, 3, 4].map((i) => (
+                <Skeleton key={i} className="h-14" />
+              ))}
+            </div>
+          ))}
 
         {error && (
           <div className="p-5">
@@ -290,7 +365,11 @@ export default function SearchPage() {
           </div>
         )}
 
-        {!isLoading && !error && searchResults.length > 0 && (
+        {!isLoading && !error && searchResults.length > 0 && isGridView && (
+          <SearchResultsGrid results={searchResults} contentType={searchMode} />
+        )}
+
+        {!isLoading && !error && searchResults.length > 0 && !isGridView && (
           <SearchResultsTable
             results={searchResults}
             currentSort={urlSort}
