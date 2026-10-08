@@ -31,6 +31,7 @@ from comicarr.tables import comics, issues, metadata, weekly
 def pull_db(tmp_path, monkeypatch):
     monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(comicarr, "CONFIG", None, raising=False)
     db.shutdown_engine()
     engine = db.get_engine()
     metadata.create_all(engine)

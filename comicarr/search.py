@@ -65,6 +65,13 @@ from comicarr.app.common.remote_artifacts import (
 from comicarr.app.core.workers import submit_background_future
 from comicarr.app.downloads import handoff
 from comicarr.app.search import progress
+from comicarr.app.search.backlog import (
+    PASS_RSS_WANTED,
+    PassBudget,
+    is_recent_release,
+    release_pass,
+    try_acquire_pass,
+)
 from comicarr.app.search.evaluation import EvaluationSession
 from comicarr.app.search.evaluation_handoff import handoff_matches
 from comicarr.app.search.provider_config import provider_enabled, split_newznab_category_field
@@ -167,6 +174,31 @@ def _rss_result_log_summary(result):
     return "rss result: site=%s title=%s" % (
         redact_sensitive_text(result.get("site", "unknown")),
         redact_sensitive_text(result.get("title", "unknown")),
+    )
+
+
+def _issue_search_summary(
+    comic_name, issue_number, series_year, providers_tried, modes, names_tried=(), found_via=None
+):
+    """One INFO line for an issue search: outcome, modes, providers, and the alternate names searched."""
+    year_bit = " (%s)" % series_year if series_year else ""
+    if issue_number is not None:
+        target = "%s%s #%s" % (comic_name, year_bit, issue_number)
+    else:
+        target = "%s%s" % (comic_name, year_bit)
+    mode_bit = "+".join(modes) if modes else "search"
+    alternates = [name for name in names_tried if name != comic_name]
+    names_bit = "; names: %s" % ", ".join(alternates) if alternates else ""
+    if found_via is not None:
+        return "[SEARCH] %s: found via %s after %s%s" % (target, found_via, mode_bit, names_bit)
+    if not providers_tried:
+        return "[SEARCH] %s: no match after %s (no providers tried)%s" % (target, mode_bit, names_bit)
+    return "[SEARCH] %s: no match after %s across %s provider(s) (%s)%s" % (
+        target,
+        mode_bit,
+        len(providers_tried),
+        ", ".join(providers_tried),
+        names_bit,
     )
 
 
@@ -404,6 +436,10 @@ def search_init(
 
     findcomiciss, c_number = get_findcomiciss(IssueNumber)
 
+    providers_tried = []
+    search_modes_used = []
+    names_tried = []
+
     while srchloop <= searchcnt:
         """searchmodes:
         rss - will run through the built-cached db of entries
@@ -435,7 +471,7 @@ def search_init(
                     cmloopit = 2
                 else:
                     cmloopit = 1
-        logger.info("cmloopit: %s" % cmloopit)
+        logger.fdebug("cmloopit: %s" % cmloopit)
         chktpb = 0
         from comicarr.app.manga.acquisition import booktype_bypasses_format_gates
 
@@ -472,8 +508,24 @@ def search_init(
         checked_once = []
         prov_count = 0
 
+        if searchmode not in search_modes_used:
+            search_modes_used.append(searchmode)
+        if searchmode == "rss":
+            altnames = gen_altnames(ComicName, AlternateSearch, filesafe, smode)
+        elif unfiltered_pass_active():
+            altnames = [
+                {
+                    "ComicName": ComicName,
+                    "unaltered_ComicName": ComicName,
+                }
+            ]
+        else:
+            altnames = gen_altnames(ComicName, AlternateSearch, filesafe, smode)
+        if manga_volume_target:
+            altnames, manga_volume_terms = manga_volume_altnames(altnames, volume_number)
+
         while tmp_prov_count > prov_count:
-            logger.info("tmp_prov_count: %s / prov_count: %s" % (tmp_prov_count, prov_count))
+            logger.fdebug("tmp_prov_count: %s / prov_count: %s" % (tmp_prov_count, prov_count))
             tmp_cmloopit = cmloopit
             progress_provider = provider_list["prov_order"][prov_count]
             while tmp_cmloopit >= (0 if pack_title_pass else 1):
@@ -483,7 +535,7 @@ def search_init(
                     tmp_IssueNumber = IssueNumber
 
                 prov_order = provider_list["prov_order"]
-                logger.info("checked_once: %s" % (checked_once,))
+                logger.fdebug("checked_once: %s" % (checked_once,))
                 if checked_once:
                     if prov_order[prov_count] in checked_once:
                         break
@@ -494,7 +546,7 @@ def search_init(
                 send_prov_count = tmp_prov_count - prov_count
                 newznab_host = None
                 torznab_host = None
-                logger.info("prov_order[prov_count]: %s" % (prov_order[prov_count],))
+                logger.fdebug("prov_order[prov_count]: %s" % (prov_order[prov_count],))
 
                 searchprov = last_run_check(check=True)
 
@@ -537,7 +589,7 @@ def search_init(
                 ):
                     if all(["experimental" not in searchprov.keys(), "Experimental" not in searchprov.keys()]):
                         prov_order[prov_count] = "experimental"
-                        logger.info("resetting searchprov - last run here..")
+                        logger.fdebug("resetting searchprov - last run here..")
                         searchprov["experimental"] = {
                             "id": 101,
                             "type": "experimental",
@@ -625,7 +677,7 @@ def search_init(
                         if fnd is True:
                             break
                 else:
-                    logger.info("why here? resetting searchprov - last run here..")
+                    logger.fdebug("why here? resetting searchprov - last run here..")
                     newznab_host = None
                     torznab_host = None
                     if prov_order[prov_count].lower() not in searchprov.keys():
@@ -640,7 +692,7 @@ def search_init(
                         searchprov[prov_order[prov_count].lower()]["active"] = True
 
                 current_prov = get_current_prov(searchprov)
-                logger.info("current_prov: %s" % (current_prov))
+                logger.fdebug("current_prov: %s" % (current_prov))
 
                 if all(
                     [
@@ -650,7 +702,7 @@ def search_init(
                 ):
                     break
 
-                logger.info("tmp_cmloopit: %s [Issue #:%s]" % (tmp_cmloopit, tmp_IssueNumber))
+                logger.fdebug("tmp_cmloopit: %s [Issue #:%s]" % (tmp_cmloopit, tmp_IssueNumber))
 
                 scarios = {
                     "tmp_IssueNumber": tmp_IssueNumber,
@@ -685,48 +737,23 @@ def search_init(
                     "findit": findit,
                 }
 
-                if searchmode == "rss":
-                    logger.info("RSS searchmode enabled for %s" % ComicName)
-                    scarios["RSS"] = "yes"
-                    altnames = gen_altnames(ComicName, AlternateSearch, filesafe, smode)
-                    if manga_volume_target:
-                        altnames, manga_volume_terms = manga_volume_altnames(altnames, volume_number)
-                        scarios["manga_volume_terms"] = manga_volume_terms
-                    for xx in altnames:
-                        logger.info("comicname searched for: %s" % ComicName)
-                        if all([findit["status"] is False, not provider_blocked]):
-                            scarios["ComicName"] = xx["ComicName"]
-                            scarios["unaltered_ComicName"] = xx["unaltered_ComicName"]
-                            findit = search_the_matrix(scarios)
-                            if findit["status"] is True:
-                                logger.fdebug("findit = found!")
-                                break
-
-                else:
-                    logger.info("API searchmode enabled for %s" % ComicName)
-                    scarios["RSS"] = "no"
-                    if unfiltered_pass_active():
-                        altnames = [
-                            {
-                                "ComicName": ComicName,
-                                "unaltered_ComicName": ComicName,
-                            }
-                        ]
-                    else:
-                        altnames = gen_altnames(ComicName, AlternateSearch, filesafe, smode)
-                    if manga_volume_target:
-                        altnames, manga_volume_terms = manga_volume_altnames(altnames, volume_number)
-                        scarios["manga_volume_terms"] = manga_volume_terms
-                    for xx in altnames:
-                        logger.info("comicname searched for: %s" % ComicName)
-                        if all([findit["status"] is False, not provider_blocked]):
-                            scarios["ComicName"] = xx["ComicName"]
-                            scarios["unaltered_ComicName"] = xx["unaltered_ComicName"]
-                            findit = search_the_matrix(scarios)
-                            logger.info("findit: %s" % (findit,))
-                            if findit["status"] is True:
-                                logger.fdebug("findit = found!")
-                                break
+                scarios["RSS"] = "yes" if searchmode == "rss" else "no"
+                logger.fdebug("%s searchmode enabled for %s" % (searchmode.upper(), ComicName))
+                prov_label = "".join(current_prov.keys()) if current_prov else None
+                if prov_label and prov_label not in providers_tried:
+                    providers_tried.append(prov_label)
+                for xx in altnames:
+                    logger.fdebug("comicname searched for: %s" % xx["ComicName"])
+                    if all([findit["status"] is False, not provider_blocked]):
+                        if xx["ComicName"] not in names_tried:
+                            names_tried.append(xx["ComicName"])
+                        scarios["ComicName"] = xx["ComicName"]
+                        scarios["unaltered_ComicName"] = xx["unaltered_ComicName"]
+                        findit = search_the_matrix(scarios)
+                        logger.fdebug("findit: %s" % (findit,))
+                        if findit["status"] is True:
+                            logger.fdebug("findit = found!")
+                            break
 
                 if findit["status"] is True:
                     break
@@ -743,7 +770,7 @@ def search_init(
                     "Public Torrents",
                     "experimental",
                 ):
-                    logger.info("check_once check.")
+                    logger.fdebug("check_once check.")
                     checked_once.append("".join(current_prov.keys()))
 
                 if current_prov.get("newznab"):
@@ -763,12 +790,12 @@ def search_init(
                                     issuedisplay = None
 
                     if issuedisplay is None:
-                        logger.info(
+                        logger.fdebug(
                             "Could not find %s (%s) using %s [%s]"
                             % (ComicName, SeriesYear, list(current_prov.keys())[0], searchmode)
                         )
                     else:
-                        logger.info(
+                        logger.fdebug(
                             "Could not find Issue %s of %s (%s) using %s [%s]"
                             % (
                                 issuedisplay,
@@ -795,9 +822,9 @@ def search_init(
 
             progress.report_provider_complete(progress_provider)
             prov_count += 1
-            logger.info("attempting to set %s to not being the active provider." % (list(current_prov.keys())[0]))
+            logger.fdebug("attempting to set %s to not being the active provider." % (list(current_prov.keys())[0]))
             if findit["lastrun"] != 0:
-                logger.info("setting last run to: %s" % (findit["lastrun"]))
+                logger.fdebug("setting last run to: %s" % (findit["lastrun"]))
                 last_run_check(
                     write={
                         "".join(current_prov.keys()): {
@@ -810,7 +837,7 @@ def search_init(
                     }
                 )
             current_prov[list(current_prov.keys())[0]]["active"] = False
-            logger.info("setting took. Current provider is: %s" % (current_prov,))
+            logger.fdebug("setting took. Current provider is: %s" % (current_prov,))
 
         srchloop += 1
 
@@ -822,11 +849,28 @@ def search_init(
         if comicarr.CONFIG.SNATCHED_HAVETOTAL and any([oneoff is False, IssueID is not None]):
             logger.fdebug("Adding this to the HAVE total for the series.")
             helpers.incr_snatched(ComicID)
-        return findit, list(current_prov.keys())[0]
+        found_prov = list(current_prov.keys())[0]
+        if manualsearch is None:
+            logger.info(
+                _issue_search_summary(
+                    ComicName,
+                    IssueNumber,
+                    SeriesYear,
+                    providers_tried,
+                    search_modes_used,
+                    names_tried,
+                    found_via=found_prov,
+                )
+            )
+        return findit, found_prov
     else:
         logger.fdebug("findit: %s" % findit)
         if manualsearch is None:
-            logger.info("Finished searching via : %s. Issue not found - status kept as Wanted." % searchmode)
+            logger.info(
+                _issue_search_summary(
+                    ComicName, IssueNumber, SeriesYear, providers_tried, search_modes_used, names_tried
+                )
+            )
         else:
             logger.fdebug("Could not find issue doing a manual search via : %s" % searchmode)
         if current_prov.get("32P"):
@@ -1060,16 +1104,16 @@ def NZB_SEARCH(
             tmpprov = nzbprov
     if cmloopit == 4:
         issuedisplay = None
-        logger.info("Shhh be very quiet...I'm looking for %s (%s) using %s." % (ComicName, ComicYear, tmpprov))
+        logger.fdebug("Shhh be very quiet...I'm looking for %s (%s) using %s." % (ComicName, ComicYear, tmpprov))
     elif IssueNumber is not None:
         issuedisplay = IssueNumber
     else:
         issuedisplay = StoreDate[5:]
 
     if "0-Day Comics Pack" in ComicName:
-        logger.info("Shhh be very quiet...I'm looking for %s using %s." % (ComicName, tmpprov))
+        logger.fdebug("Shhh be very quiet...I'm looking for %s using %s." % (ComicName, tmpprov))
     elif cmloopit != 4:
-        logger.info(
+        logger.fdebug(
             "Shhh be very quiet...I'm looking for %s issue: %s (%s) using %s."
             % (ComicName, issuedisplay, ComicYear, tmpprov)
         )
@@ -1276,7 +1320,7 @@ def NZB_SEARCH(
                     ComicVersion,
                     oneoff,
                 )
-            logger.info("bb: %s" % (bb,))
+            logger.fdebug("bb: %s" % (bb,))
             if any([bb is None, bb == "no results"]):
                 verified_matches = "no results"
             else:
@@ -1421,7 +1465,7 @@ def NZB_SEARCH(
                         )
                         break
                     is_info["foundc"]["lastrun"] = time.time()
-                    logger.info(
+                    logger.fdebug(
                         "setting lastrun for %s to %s"
                         % (is_info["foundc"]["provider"], time.ctime(is_info["foundc"]["lastrun"]))
                     )
@@ -1504,7 +1548,7 @@ def NZB_SEARCH(
                         verified_matches = evaluator.evaluate(entries, is_info).selected
 
             elif nzbprov == "experimental":
-                logger.info("sending %s to experimental search" % findcomic)
+                logger.fdebug("sending %s to experimental search" % findcomic)
                 bb = findcomicfeed.Startit(findcomic, isssearch, comyear, ComicVersion, IssDateFix, booktype)
                 if any([bb == "disable", bb == "no results"]):
                     helpers.disable_provider("experimental", "unresponsive / down")
@@ -1808,11 +1852,7 @@ def searchforissue(
     a single operation without changing the per-issue worker contract.
     """
     evaluator = evaluator or EvaluationSession()
-    if rsschecker == "yes":
-        while comicarr.SEARCHLOCK.locked():
-            time.sleep(5)
-
-    if comicarr.SEARCHLOCK.locked():
+    if rsschecker != "yes" and comicarr.SEARCHLOCK.locked():
         logger.info("A search is currently in progress....queueing this up again to try in a bit.")
         return {"status": "IN PROGRESS"}
 
@@ -1854,88 +1894,38 @@ def searchforissue(
         )
     ):
         if not issueid or rsschecker:
-            if rsschecker:
-                logger.info(
-                    "Initiating RSS Search Scan at the scheduled interval of %s minutes"
-                    % comicarr.CONFIG.RSS_CHECKINTERVAL
-                )
-                comicarr.SEARCHLOCK.acquire()
-            else:
-                logger.info("Initiating check to add Wanted items to Search Queue....")
-
-            stloop = 2
-            results = []
-            search_skip = {}
-            queued_count = 0
-            error_count = 0
-
-            if comicarr.CONFIG.ANNUALS_ON:
-                stloop += 1
-            while stloop > 0:
-                if stloop == 1:
-                    if comicarr.CONFIG.FAILED_DOWNLOAD_HANDLING and comicarr.CONFIG.FAILED_AUTO:
-                        issues_1 = _wanted_candidate_rows(issues, ["Wanted", "Failed"])
-                    else:
-                        issues_1 = _wanted_candidate_rows(issues, ["Wanted"])
-                    for iss in issues_1:
-                        checkit = searchforissue_checker(
-                            iss["IssueID"],
-                            iss["ReleaseDate"],
-                            iss["IssueDate"],
-                            iss["DigitalDate"],
-                            {
-                                "ComicName": iss["ComicName"],
-                                "Issue_Number": iss["Issue_Number"],
-                                "ComicID": iss["ComicID"],
-                                "candidate": {
-                                    "LegacyStatus": iss["Status"],
-                                    "AcquisitionIntent": iss.get("AcquisitionIntent"),
-                                    "SeriesStatus": iss["SeriesStatus"],
-                                },
-                            },
+            backlog_held = False
+            rss_budget = None
+            try:
+                if rsschecker:
+                    logger.info(
+                        "Initiating RSS Search Scan at the scheduled interval of %s minutes"
+                        % comicarr.CONFIG.RSS_CHECKINTERVAL
+                    )
+                    if not try_acquire_pass():
+                        logger.info(
+                            "A scheduled Wanted/RSS backlog pass is already running; skipping this RSS watchlist scan"
                         )
-                        if checkit["status"] is True:
-                            if not any(r["IssueID"] == iss["IssueID"] for r in results):
-                                results.append(
-                                    {
-                                        "ComicID": iss["ComicID"],
-                                        "IssueID": iss["IssueID"],
-                                        "Issue_Number": iss["Issue_Number"],
-                                        "IssueDate": iss["IssueDate"],
-                                        "StoreDate": iss["ReleaseDate"],
-                                        "DigitalDate": iss["DigitalDate"],
-                                        "SARC": None,
-                                        "StoryArcID": None,
-                                        "IssueArcID": None,
-                                        "mode": "want",
-                                        "DateAdded": iss["DateAdded"],
-                                        "ComicName": iss["ComicName"],
-                                    }
-                                )
-                        else:
-                            iss["Issue_Number"]
-                            schk = False
-                            for s in search_skip:
-                                if s == iss["ComicID"]:
-                                    search_skip[iss["ComicID"]].update(
-                                        {"issue": iss["Issue_Number"], "reason": checkit["reason"]}
-                                    )
-                                    schk = True
-                                    break
-                            if schk is False:
-                                search_skip[iss["ComicID"]] = {
-                                    "Issue_Number": [iss["Issue_Number"]],
-                                    "ComicName": iss["ComicName"],
-                                }
+                        return {"status": "IN PROGRESS"}
+                    backlog_held = True
+                else:
+                    logger.info("Initiating check to add Wanted items to Search Queue....")
 
-                elif stloop == 2:
-                    if comicarr.CONFIG.SEARCH_STORYARCS is True or rsschecker:
+                stloop = 2
+                results = []
+                search_skip = {}
+                queued_count = 0
+                error_count = 0
+
+                if comicarr.CONFIG.ANNUALS_ON:
+                    stloop += 1
+                while stloop > 0:
+                    if stloop == 1:
                         if comicarr.CONFIG.FAILED_DOWNLOAD_HANDLING and comicarr.CONFIG.FAILED_AUTO:
-                            issues_2 = _wanted_candidate_rows(storyarcs, ["Wanted", "Failed"])
+                            issues_1 = _wanted_candidate_rows(issues, ["Wanted", "Failed"])
                         else:
-                            issues_2 = _wanted_candidate_rows(storyarcs, ["Wanted"])
-                        cnt = 0
-                        for iss in issues_2:
+                            issues_1 = _wanted_candidate_rows(issues, ["Wanted"])
+                        for iss in issues_1:
                             checkit = searchforissue_checker(
                                 iss["IssueID"],
                                 iss["ReleaseDate"],
@@ -1943,11 +1933,11 @@ def searchforissue(
                                 iss["DigitalDate"],
                                 {
                                     "ComicName": iss["ComicName"],
-                                    "Issue_Number": iss["IssueNumber"],
+                                    "Issue_Number": iss["Issue_Number"],
                                     "ComicID": iss["ComicID"],
                                     "candidate": {
                                         "LegacyStatus": iss["Status"],
-                                        "AcquisitionIntent": None,
+                                        "AcquisitionIntent": iss.get("AcquisitionIntent"),
                                         "SeriesStatus": iss["SeriesStatus"],
                                     },
                                 },
@@ -1958,526 +1948,390 @@ def searchforissue(
                                         {
                                             "ComicID": iss["ComicID"],
                                             "IssueID": iss["IssueID"],
-                                            "Issue_Number": iss["IssueNumber"],
+                                            "Issue_Number": iss["Issue_Number"],
                                             "IssueDate": iss["IssueDate"],
                                             "StoreDate": iss["ReleaseDate"],
                                             "DigitalDate": iss["DigitalDate"],
-                                            "SARC": iss["StoryArc"],
-                                            "StoryArcID": iss["StoryArcID"],
-                                            "IssueArcID": iss["IssueArcID"],
-                                            "mode": "story_arc",
+                                            "SARC": None,
+                                            "StoryArcID": None,
+                                            "IssueArcID": None,
+                                            "mode": "want",
                                             "DateAdded": iss["DateAdded"],
                                             "ComicName": iss["ComicName"],
                                         }
                                     )
-                                cnt += 1
                             else:
-                                iss["IssueNumber"]
+                                iss["Issue_Number"]
                                 schk = False
                                 for s in search_skip:
                                     if s == iss["ComicID"]:
                                         search_skip[iss["ComicID"]].update(
-                                            {"issue": iss["IssueNumber"], "reason": checkit["reason"]}
+                                            {"issue": iss["Issue_Number"], "reason": checkit["reason"]}
                                         )
                                         schk = True
                                         break
                                 if schk is False:
                                     search_skip[iss["ComicID"]] = {
-                                        "Issue_Number": [iss["IssueNumber"]],
+                                        "Issue_Number": [iss["Issue_Number"]],
                                         "ComicName": iss["ComicName"],
                                     }
 
-                        logger.info("Issues that belong to part of a Story Arc to be searched for : %s" % cnt)
-                elif stloop == 3:
-                    if comicarr.CONFIG.FAILED_DOWNLOAD_HANDLING and comicarr.CONFIG.FAILED_AUTO:
-                        issues_3 = _wanted_candidate_rows(
-                            annuals,
-                            ["Wanted", "Failed"],
-                            or_(annuals.c.Deleted.is_(None), annuals.c.Deleted != 1),
-                        )
-                    else:
-                        issues_3 = _wanted_candidate_rows(
-                            annuals,
-                            ["Wanted"],
-                            or_(annuals.c.Deleted.is_(None), annuals.c.Deleted != 1),
-                        )
-                    for iss in issues_3:
-                        checkit = searchforissue_checker(
-                            iss["IssueID"],
-                            iss["ReleaseDate"],
-                            iss["IssueDate"],
-                            iss["DigitalDate"],
-                            {
-                                "ComicName": iss["ComicName"],
-                                "Issue_Number": iss["Issue_Number"],
-                                "ComicID": iss["ComicID"],
-                                "candidate": {
-                                    "LegacyStatus": iss["Status"],
-                                    "AcquisitionIntent": iss.get("AcquisitionIntent"),
-                                    "SeriesStatus": iss["SeriesStatus"],
-                                },
-                            },
-                        )
-                        if checkit["status"] is True:
-                            if not any(r["IssueID"] == iss["IssueID"] for r in results):
-                                results.append(
+                    elif stloop == 2:
+                        if comicarr.CONFIG.SEARCH_STORYARCS is True or rsschecker:
+                            if comicarr.CONFIG.FAILED_DOWNLOAD_HANDLING and comicarr.CONFIG.FAILED_AUTO:
+                                issues_2 = _wanted_candidate_rows(storyarcs, ["Wanted", "Failed"])
+                            else:
+                                issues_2 = _wanted_candidate_rows(storyarcs, ["Wanted"])
+                            cnt = 0
+                            for iss in issues_2:
+                                checkit = searchforissue_checker(
+                                    iss["IssueID"],
+                                    iss["ReleaseDate"],
+                                    iss["IssueDate"],
+                                    iss["DigitalDate"],
                                     {
+                                        "ComicName": iss["ComicName"],
+                                        "Issue_Number": iss["IssueNumber"],
                                         "ComicID": iss["ComicID"],
-                                        "IssueID": iss["IssueID"],
-                                        "Issue_Number": iss["Issue_Number"],
-                                        "IssueDate": iss["IssueDate"],
-                                        "StoreDate": iss["ReleaseDate"],
-                                        "DigitalDate": iss["DigitalDate"],
-                                        "SARC": None,
-                                        "StoryArcID": None,
-                                        "IssueArcID": None,
-                                        "mode": "want_ann",
-                                        "DateAdded": iss["DateAdded"],
-                                        "ComicName": iss["ReleaseComicName"],
-                                    }
+                                        "candidate": {
+                                            "LegacyStatus": iss["Status"],
+                                            "AcquisitionIntent": None,
+                                            "SeriesStatus": iss["SeriesStatus"],
+                                        },
+                                    },
                                 )
+                                if checkit["status"] is True:
+                                    if not any(r["IssueID"] == iss["IssueID"] for r in results):
+                                        results.append(
+                                            {
+                                                "ComicID": iss["ComicID"],
+                                                "IssueID": iss["IssueID"],
+                                                "Issue_Number": iss["IssueNumber"],
+                                                "IssueDate": iss["IssueDate"],
+                                                "StoreDate": iss["ReleaseDate"],
+                                                "DigitalDate": iss["DigitalDate"],
+                                                "SARC": iss["StoryArc"],
+                                                "StoryArcID": iss["StoryArcID"],
+                                                "IssueArcID": iss["IssueArcID"],
+                                                "mode": "story_arc",
+                                                "DateAdded": iss["DateAdded"],
+                                                "ComicName": iss["ComicName"],
+                                            }
+                                        )
+                                    cnt += 1
+                                else:
+                                    iss["IssueNumber"]
+                                    schk = False
+                                    for s in search_skip:
+                                        if s == iss["ComicID"]:
+                                            search_skip[iss["ComicID"]].update(
+                                                {"issue": iss["IssueNumber"], "reason": checkit["reason"]}
+                                            )
+                                            schk = True
+                                            break
+                                    if schk is False:
+                                        search_skip[iss["ComicID"]] = {
+                                            "Issue_Number": [iss["IssueNumber"]],
+                                            "ComicName": iss["ComicName"],
+                                        }
+
+                            logger.info("Issues that belong to part of a Story Arc to be searched for : %s" % cnt)
+                    elif stloop == 3:
+                        if comicarr.CONFIG.FAILED_DOWNLOAD_HANDLING and comicarr.CONFIG.FAILED_AUTO:
+                            issues_3 = _wanted_candidate_rows(
+                                annuals,
+                                ["Wanted", "Failed"],
+                                or_(annuals.c.Deleted.is_(None), annuals.c.Deleted != 1),
+                            )
                         else:
-                            iss["Issue_Number"]
-                            schk = False
-                            for s in search_skip:
-                                if s == iss["ComicID"]:
-                                    search_skip[iss["ComicID"]].update(
-                                        {"issue": iss["Issue_Number"], "reason": checkit["reason"]}
-                                    )
-                                    schk = True
-                                    break
-                            if schk is False:
-                                search_skip[iss["ComicID"]] = {
-                                    "Issue_Number": [iss["Issue_Number"]],
+                            issues_3 = _wanted_candidate_rows(
+                                annuals,
+                                ["Wanted"],
+                                or_(annuals.c.Deleted.is_(None), annuals.c.Deleted != 1),
+                            )
+                        for iss in issues_3:
+                            checkit = searchforissue_checker(
+                                iss["IssueID"],
+                                iss["ReleaseDate"],
+                                iss["IssueDate"],
+                                iss["DigitalDate"],
+                                {
                                     "ComicName": iss["ComicName"],
-                                }
+                                    "Issue_Number": iss["Issue_Number"],
+                                    "ComicID": iss["ComicID"],
+                                    "candidate": {
+                                        "LegacyStatus": iss["Status"],
+                                        "AcquisitionIntent": iss.get("AcquisitionIntent"),
+                                        "SeriesStatus": iss["SeriesStatus"],
+                                    },
+                                },
+                            )
+                            if checkit["status"] is True:
+                                if not any(r["IssueID"] == iss["IssueID"] for r in results):
+                                    results.append(
+                                        {
+                                            "ComicID": iss["ComicID"],
+                                            "IssueID": iss["IssueID"],
+                                            "Issue_Number": iss["Issue_Number"],
+                                            "IssueDate": iss["IssueDate"],
+                                            "StoreDate": iss["ReleaseDate"],
+                                            "DigitalDate": iss["DigitalDate"],
+                                            "SARC": None,
+                                            "StoryArcID": None,
+                                            "IssueArcID": None,
+                                            "mode": "want_ann",
+                                            "DateAdded": iss["DateAdded"],
+                                            "ComicName": iss["ReleaseComicName"],
+                                        }
+                                    )
+                            else:
+                                iss["Issue_Number"]
+                                schk = False
+                                for s in search_skip:
+                                    if s == iss["ComicID"]:
+                                        search_skip[iss["ComicID"]].update(
+                                            {"issue": iss["Issue_Number"], "reason": checkit["reason"]}
+                                        )
+                                        schk = True
+                                        break
+                                if schk is False:
+                                    search_skip[iss["ComicID"]] = {
+                                        "Issue_Number": [iss["Issue_Number"]],
+                                        "ComicName": iss["ComicName"],
+                                    }
 
-                stloop -= 1
+                    stloop -= 1
 
-            rss_queue = []
-            if len(search_skip) > 0:
-                logger.info(
-                    "The following series have been skipped due to either being"
-                    " already in a Downloaded/Snatched status or having Invalid"
-                    " Date-data in the database: %s" % (search_skip)
-                )
-
-            for result in sorted(results, key=itemgetter("StoreDate"), reverse=True):
-                try:
-                    OneOff = False
-                    storyarc_watchlist = False
-                    comic = db.select_one(
-                        select(comics).where((comics.c.ComicID == result["ComicID"]) & (comics.c.ComicName != "None"))
+                rss_queue = []
+                if len(search_skip) > 0:
+                    logger.info(
+                        "The following series have been skipped due to either being"
+                        " already in a Downloaded/Snatched status or having Invalid"
+                        " Date-data in the database: %s" % (search_skip)
                     )
-                    if all([comic is None, result["mode"] == "story_arc"]):
+
+                scan_results = sorted(results, key=itemgetter("StoreDate"), reverse=True)
+                if rsschecker:
+                    rss_budget = PassBudget(PASS_RSS_WANTED)
+                    scan_results = rss_budget.select_candidates(
+                        scan_results, lambda row: row.get("IssueID"), recent=is_recent_release
+                    )
+                    logger.info(
+                        "RSS Search Scan considering %s Wanted item(s) this pass (%s already checked this cycle)"
+                        % (len(scan_results), rss_budget.skipped)
+                    )
+
+                for result in scan_results:
+                    if rss_budget is not None:
+                        if not rss_budget.remaining():
+                            logger.info(
+                                "RSS Search Scan reached its time budget; remaining Wanted items resume next pass"
+                            )
+                            break
+                        # Mark every handed-out row checked, including ones skipped below; an
+                        # unconsumed row would keep the cycle from ever completing.
+                        rss_budget.consume(result["IssueID"])
+                    try:
+                        OneOff = False
+                        storyarc_watchlist = False
                         comic = db.select_one(
-                            select(storyarcs).where(
-                                (storyarcs.c.StoryArcID == result["StoryArcID"])
-                                & (storyarcs.c.IssueArcID == result["IssueArcID"])
+                            select(comics).where(
+                                (comics.c.ComicID == result["ComicID"]) & (comics.c.ComicName != "None")
                             )
                         )
-                        if comic is None:
+                        if all([comic is None, result["mode"] == "story_arc"]):
+                            comic = db.select_one(
+                                select(storyarcs).where(
+                                    (storyarcs.c.StoryArcID == result["StoryArcID"])
+                                    & (storyarcs.c.IssueArcID == result["IssueArcID"])
+                                )
+                            )
+                            if comic is None:
+                                logger.fdebug(
+                                    "%s has no associated comic information in the Arc."
+                                    " Skipping searching for this series." % result["ComicID"]
+                                )
+                                continue
+                            else:
+                                OneOff = True
+                        elif comic is None:
                             logger.fdebug(
                                 "%s has no associated comic information in the Arc."
                                 " Skipping searching for this series." % result["ComicID"]
                             )
                             continue
                         else:
-                            OneOff = True
-                    elif comic is None:
-                        logger.fdebug(
-                            "%s has no associated comic information in the Arc."
-                            " Skipping searching for this series." % result["ComicID"]
-                        )
-                        continue
-                    else:
-                        storyarc_watchlist = True
-                    if result["StoreDate"] == "0000-00-00" or result["StoreDate"] is None:
-                        if (
-                            any(
-                                [
-                                    result["IssueDate"] is None,
-                                    result["IssueDate"] == "0000-00-00",
-                                ]
-                            )
-                            and result["DigitalDate"] == "0000-00-00"
+                            storyarc_watchlist = True
+                        if result["StoreDate"] == "0000-00-00" or result["StoreDate"] is None:
+                            if (
+                                any(
+                                    [
+                                        result["IssueDate"] is None,
+                                        result["IssueDate"] == "0000-00-00",
+                                    ]
+                                )
+                                and result["DigitalDate"] == "0000-00-00"
+                            ):
+                                logger.fdebug(
+                                    "ComicID: %s has invalid Date data. Skipping searching"
+                                    " for this series." % result["ComicID"]
+                                )
+                                continue
+
+                        foundNZB = "none"
+                        AllowPacks = False
+                        if result["mode"] == "want_ann" or "annual" in result["ComicName"]:
+                            comicname = result["ComicName"]
+                        else:
+                            comicname = comic["ComicName"]
+                        if all([result["mode"] == "story_arc", storyarc_watchlist is False]):
+                            Comicname_filesafe = helpers.filesafe(comicname)
+                            SeriesYear = comic["SeriesYear"]
+                            Publisher = comic["Publisher"]
+                            AlternateSearch = None
+                            UseFuzzy = None
+                            ComicVersion = comic["Volume"]
+                            TorrentID_32p = None
+                            booktype = comic["Type"]
+                            ignore_booktype = False
+                        else:
+                            Comicname_filesafe = comic["ComicName_Filesafe"]
+                            SeriesYear = comic["ComicYear"]
+                            Publisher = comic["ComicPublisher"]
+                            AlternateSearch = comic["AlternateSearch"]
+                            UseFuzzy = comic["UseFuzzy"]
+                            ComicVersion = comic["ComicVersion"]
+                            TorrentID_32p = comic["TorrentID_32P"]
+                            booktype = comic["Type"]
+                            if comic["Corrected_Type"] is not None and comic["Type"] != comic["Corrected_Type"]:
+                                booktype = comic["Corrected_Type"]
+                            ignore_booktype = bool(comic["IgnoreType"])
+                            if any([comic["AllowPacks"] == 1, comic["AllowPacks"] == "1"]):
+                                AllowPacks = True
+
+                        IssueDate = result["IssueDate"]
+                        StoreDate = result["StoreDate"]
+                        DigitalDate = result["DigitalDate"]
+
+                        if result["IssueDate"] is None:
+                            ComicYear = SeriesYear
+                        else:
+                            ComicYear = str(result["IssueDate"])[:4]
+
+                        if result["DateAdded"] is None:
+                            DA = datetime.datetime.today()
+                            DateAdded = DA.strftime("%Y-%m-%d")
+                            if result["mode"] == "want":
+                                table = "issues"
+                            elif result["mode"] == "want_ann":
+                                table = "annuals"
+                            elif result["mode"] == "story_arc":
+                                table = "storyarcs"
+                            else:
+                                table = None
+                                logger.warn(
+                                    "[SEARCH-ERROR] Error while trying to write DateAdded"
+                                    " value to non-existant table due to given search mode"
+                                    " of %s" % result["mode"]
+                                )
+                            if table is not None:
+                                logger.fdebug(
+                                    "%s #%s did not have a DateAdded recorded, setting it"
+                                    " : %s"
+                                    % (
+                                        comicname,
+                                        result["Issue_Number"],
+                                        DateAdded,
+                                    )
+                                )
+                                db.upsert(
+                                    table,
+                                    {"DateAdded": DateAdded},
+                                    {"IssueID": result["IssueID"]},
+                                )
+
+                        else:
+                            DateAdded = result["DateAdded"]
+
+                        if rsschecker is None and (
+                            DateAdded >= comicarr.SEARCH_TIER_DATE or acquisition_run_id is not None
                         ):
                             logger.fdebug(
-                                "ComicID: %s has invalid Date data. Skipping searching"
-                                " for this series." % result["ComicID"]
-                            )
-                            continue
-
-                    foundNZB = "none"
-                    AllowPacks = False
-                    if result["mode"] == "want_ann" or "annual" in result["ComicName"]:
-                        comicname = result["ComicName"]
-                    else:
-                        comicname = comic["ComicName"]
-                    if all([result["mode"] == "story_arc", storyarc_watchlist is False]):
-                        Comicname_filesafe = helpers.filesafe(comicname)
-                        SeriesYear = comic["SeriesYear"]
-                        Publisher = comic["Publisher"]
-                        AlternateSearch = None
-                        UseFuzzy = None
-                        ComicVersion = comic["Volume"]
-                        TorrentID_32p = None
-                        booktype = comic["Type"]
-                        ignore_booktype = False
-                    else:
-                        Comicname_filesafe = comic["ComicName_Filesafe"]
-                        SeriesYear = comic["ComicYear"]
-                        Publisher = comic["ComicPublisher"]
-                        AlternateSearch = comic["AlternateSearch"]
-                        UseFuzzy = comic["UseFuzzy"]
-                        ComicVersion = comic["ComicVersion"]
-                        TorrentID_32p = comic["TorrentID_32P"]
-                        booktype = comic["Type"]
-                        if comic["Corrected_Type"] is not None and comic["Type"] != comic["Corrected_Type"]:
-                            booktype = comic["Corrected_Type"]
-                        ignore_booktype = bool(comic["IgnoreType"])
-                        if any([comic["AllowPacks"] == 1, comic["AllowPacks"] == "1"]):
-                            AllowPacks = True
-
-                    IssueDate = result["IssueDate"]
-                    StoreDate = result["StoreDate"]
-                    DigitalDate = result["DigitalDate"]
-
-                    if result["IssueDate"] is None:
-                        ComicYear = SeriesYear
-                    else:
-                        ComicYear = str(result["IssueDate"])[:4]
-
-                    if result["DateAdded"] is None:
-                        DA = datetime.datetime.today()
-                        DateAdded = DA.strftime("%Y-%m-%d")
-                        if result["mode"] == "want":
-                            table = "issues"
-                        elif result["mode"] == "want_ann":
-                            table = "annuals"
-                        elif result["mode"] == "story_arc":
-                            table = "storyarcs"
-                        else:
-                            table = None
-                            logger.warn(
-                                "[SEARCH-ERROR] Error while trying to write DateAdded"
-                                " value to non-existant table due to given search mode"
-                                " of %s" % result["mode"]
-                            )
-                        if table is not None:
-                            logger.fdebug(
-                                "%s #%s did not have a DateAdded recorded, setting it"
-                                " : %s"
+                                "[TIER1] Adding: %s #%s [ComicID:%s / IssueiD: %s][ %s >= %s]"
                                 % (
                                     comicname,
                                     result["Issue_Number"],
-                                    DateAdded,
-                                )
-                            )
-                            db.upsert(
-                                table,
-                                {"DateAdded": DateAdded},
-                                {"IssueID": result["IssueID"]},
-                            )
-
-                    else:
-                        DateAdded = result["DateAdded"]
-
-                    if rsschecker is None and (
-                        DateAdded >= comicarr.SEARCH_TIER_DATE or acquisition_run_id is not None
-                    ):
-                        logger.fdebug(
-                            "[TIER1] Adding: %s #%s [ComicID:%s / IssueiD: %s][ %s >= %s]"
-                            % (
-                                comicname,
-                                result["Issue_Number"],
-                                result["ComicID"],
-                                result["IssueID"],
-                                DateAdded,
-                                comicarr.SEARCH_TIER_DATE,
-                            )
-                        )
-                        from comicarr.app.search.commands import enqueue_search_command
-
-                        enqueue_search_command(
-                            {
-                                "comicname": comicname,
-                                "seriesyear": SeriesYear,
-                                "issuenumber": result["Issue_Number"],
-                                "issueid": result["IssueID"],
-                                "comicid": result["ComicID"],
-                                "booktype": booktype,
-                                "entity_type": "annual" if result.get("mode") == "want_ann" else "issue",
-                            },
-                            trigger=acquisition_trigger or "wanted_scan",
-                            run_id=acquisition_run_id,
-                            scope_type="wanted_backlog" if acquisition_run_id else None,
-                            scope_id="all" if acquisition_run_id else None,
-                        )
-                        queued_count += 1
-                        continue
-                    elif rsschecker:
-                        if not [x for x in rss_queue if result["IssueID"] == x[8]]:
-                            sqlquery_name = re.sub(r"[\:\-]", "%", comic["ComicName"]).strip()
-                            rss_queue.append(
-                                (
-                                    comic["ComicName"],
-                                    sqlquery_name,
-                                    result["Issue_Number"],
-                                    ComicYear,
-                                    SeriesYear,
-                                    Publisher,
-                                    IssueDate,
-                                    StoreDate,
-                                    result["IssueID"],
-                                    AlternateSearch,
-                                    UseFuzzy,
-                                    ComicVersion,
-                                    result["SARC"],
-                                    result["IssueArcID"],
-                                    result["mode"],
-                                    rsschecker,
                                     result["ComicID"],
-                                    Comicname_filesafe,
-                                    AllowPacks,
-                                    OneOff,
-                                    TorrentID_32p,
-                                    DigitalDate,
-                                    booktype,
-                                    ignore_booktype,
+                                    result["IssueID"],
+                                    DateAdded,
+                                    comicarr.SEARCH_TIER_DATE,
                                 )
                             )
-                    else:
-                        logger.fdebug(
-                            "[TIER2] %s #%s [%s < %s]"
-                            % (comicname, result["Issue_Number"], DateAdded, comicarr.SEARCH_TIER_DATE)
-                        )
-                        continue
+                            from comicarr.app.search.commands import enqueue_search_command
 
-                except Exception as err:
-                    error_count += 1
-                    exc_type, exc_value, exc_tb = sys.exc_info()
-                    filename, line_num, func_name, err_text = traceback.extract_tb(exc_tb)[-1]
-                    tracebackline = traceback.format_exc()
-
-                    except_line = {
-                        "exc_type": exc_type,
-                        "exc_value": exc_value,
-                        "exc_tb": exc_tb,
-                        "filename": filename,
-                        "line_num": line_num,
-                        "func_name": func_name,
-                        "err": str(err),
-                        "err_text": err_text,
-                        "traceback": tracebackline,
-                        "comicname": comicname,
-                        "issuenumber": result["Issue_Number"],
-                        "seriesyear": SeriesYear,
-                        "issueid": result["IssueID"],
-                        "comicid": result["ComicID"],
-                        "smode": smode,
-                        "booktype": booktype,
-                    }
-
-                    helpers.log_that_exception(except_line)
-
-                    logger.exception(tracebackline)
-                    continue
-
-            if rsschecker:
-                provider_list = provider_order()
-                if all([comicarr.CONFIG.ENABLE_TORRENTS is True, comicarr.CONFIG.ENABLE_TORRENT_SEARCH is True]) or (
-                    any(
-                        [
-                            comicarr.CONFIG.EXPERIMENTAL is True,
-                            comicarr.CONFIG.ENABLE_GETCOMICS is True,
-                            comicarr.CONFIG.ENABLE_EXTERNAL_SERVER is True,
-                        ]
-                    )
-                    or all([comicarr.CONFIG.NEWZNAB is True, len(ens) > 0])
-                    and any(
-                        [
-                            comicarr.USE_SABNZBD is True,
-                            comicarr.USE_NZBGET is True,
-                            comicarr.USE_BLACKHOLE is True,
-                        ]
-                    )
-                    or all([comicarr.CONFIG.TORZNAB is True, len(ens) > 0])
-                    and any([comicarr.CONFIG.ENABLE_TORRENTS is True, comicarr.CONFIG.ENABLE_TORRENT_SEARCH is True])
-                ):
-                    results = comicarr.rsscheck.nzbdbsearch(None, None, rsslist=rss_queue, provider_list=provider_list)
-                for x in results["entries"]:
-                    rs = {}
-                    rs["entries"] = [
-                        {
-                            "title": x["title"],
-                            "link": x["link"],
-                            "pubdate": x["pubdate"],
-                            "site": x["site"],
-                            "length": x["length"],
-                        }
-                    ]
-
-                    logger.info(_rss_result_log_summary(x))
-                    try:
-                        foundc = {}
-                        foundc["status"] = False
-                        foundc["provider"] = x["site"]
-
-                        xr = x["info"]
-                        comicname = xr["ComicName"]
-                        issue_number = xr["Issue_Number"]
-                        seriesyear = xr["SeriesYear"]
-                        comicid = xr["ComicID"]
-                        issueid = xr["IssueID"]
-                        booktype = xr["booktype"]
-                        searchmode = xr["searchmode"]
-
-                        current_prov = last_run_check(check=True, provider=x["site"])
-                        logger.info("current_prov: %s" % (current_prov,))
-                        if len(current_prov) > 0:
-                            nzbprov = list(current_prov.keys())[0]
-                            provider_stat = current_prov.get(list(current_prov.keys())[0])
-                        else:
-                            nzbprov = x["site"]
-                        foundc["lastrun"] = provider_stat["lastrun"]
-                        logger.info("nzbprov: %s" % nzbprov)
-                        logger.info("provider_stat: %s" % (provider_stat,))
-
-                        newznab_info = None
-                        torznab_info = None
-                        if provider_stat["type"] == "newznab":
-                            if provider_list["newznab_info"]:
-                                pni = provider_list["newznab_info"]
-                                for pl in pni:
-                                    if pl["info"][0] == nzbprov:
-                                        logger.info("newznab match: %s" % nzbprov)
-                                        newznab_info = pl["info"]
-                                        break
-
-                        elif provider_stat["type"] == "torznab":
-                            if provider_list["torznab_info"]:
-                                pni = provider_list["torznab_info"]
-                                for pl in pni:
-                                    if pl["info"][0] == nzbprov:
-                                        logger.info("torznab match: %s" % nzbprov)
-                                        torznab_info = pl["info"]
-                                        break
-
-                        IssDateFix = "no"
-                        if xr["IssueDate"] is not None:
-                            IssDt = xr["IssueDate"][5:7]
-                            if any([IssDt == "12", IssDt == "11", IssDt == "01", IssDt == "02", IssDt == "03"]):
-                                IssDateFix = IssDt
-
-                        else:
-                            if xr["StoreDate"] is not None:
-                                StDt = xr["StoreDate"][5:7]
-                                if any(
-                                    [StDt == "10", StDt == "12", StDt == "11", StDt == "01", StDt == "02", StDt == "03"]
-                                ):
-                                    IssDateFix = StDt
-
-                        chktpb = 0
-                        if any([booktype == "TPB", booktype == "HC", booktype == "GN"]):
-                            chktpb = 1
-
-                        logger.info("provider order: %s" % provider_list["prov_order"])
-
-                        intIss = helpers.issuedigits(xr["Issue_Number"])
-
-                        findcomiciss, c_number = get_findcomiciss(xr["Issue_Number"])
-
-                        if "0-Day" in comicname:
-                            cmloopit = 1
-                        else:
-                            cmloopit = None
-                            if any([booktype == "One-Shot", "annual" in comicname.lower()]):
-                                cmloopit = 4
-                                if "annual" in comicname.lower():
-                                    if xr["Issue_Number"] is not None:
-                                        if helpers.issuedigits(xr["Issue_Number"]) != 1000:
-                                            cmloopit = None
-                            if cmloopit is None:
-                                if len(c_number) == 1:
-                                    cmloopit = 3
-                                elif len(c_number) == 2:
-                                    cmloopit = 2
-                                else:
-                                    cmloopit = 1
-
-                        is_info = {
-                            "ComicName": xr["ComicName"],
-                            "nzbprov": nzbprov,
-                            "RSS": xr["RSS"],
-                            "UseFuzzy": xr["UseFuzzy"],
-                            "StoreDate": xr["StoreDate"],
-                            "IssueDate": xr["IssueDate"],
-                            "digitaldate": xr["DigitalDate"],
-                            "booktype": xr["booktype"],
-                            "ignore_booktype": xr["ignore_booktype"],
-                            "SeriesYear": xr["SeriesYear"],
-                            "ComicVersion": xr["ComicVersion"],
-                            "IssDateFix": IssDateFix,
-                            "ComicYear": xr["ComicYear"],
-                            "IssueID": xr["IssueID"],
-                            "ComicID": xr["ComicID"],
-                            "IssueNumber": xr["Issue_Number"],
-                            "manual": False,
-                            "newznab_host": newznab_info,
-                            "torznab_host": torznab_info,
-                            "oneoff": xr["OneOff"],
-                            "tmpprov": nzbprov,
-                            "SARC": xr["SARC"],
-                            "IssueArcID": xr["IssueArcID"],
-                            "cmloopit": cmloopit,
-                            "findcomiciss": findcomiciss,
-                            "intIss": intIss,
-                            "chktpb": chktpb,
-                            "smode": xr["searchmode"],
-                            "provider_stat": provider_stat,
-                            "allow_packs": (
-                                xr["AllowPacks"] in (1, "1", True) and comicarr.CONFIG.ENABLE_TORRENT_SEARCH
-                            ),
-                            "foundc": foundc,
-                        }
-
-                        logger.info(
-                            "looking for : %s %s (%s) [oneoff: %s][ignore_booktype: %s]"
-                            % (
-                                xr["ComicName"],
-                                xr["Issue_Number"],
-                                xr["StoreDate"],
-                                xr["OneOff"],
-                                xr["ignore_booktype"],
+                            enqueue_search_command(
+                                {
+                                    "comicname": comicname,
+                                    "seriesyear": SeriesYear,
+                                    "issuenumber": result["Issue_Number"],
+                                    "issueid": result["IssueID"],
+                                    "comicid": result["ComicID"],
+                                    "booktype": booktype,
+                                    "entity_type": "annual" if result.get("mode") == "want_ann" else "issue",
+                                },
+                                trigger=acquisition_trigger or "wanted_scan",
+                                run_id=acquisition_run_id,
+                                scope_type="wanted_backlog" if acquisition_run_id else None,
+                                scope_id="all" if acquisition_run_id else None,
                             )
-                        )
-                        rs = {}
-
-                        entries = [
-                            {
-                                "title": x["title"],
-                                "link": x["link"],
-                                "pubdate": x["pubdate"],
-                                "site": x["site"],
-                                "length": x["length"],
-                                "pack": x["pack"],
-                                "issues": x["issues"],
-                            }
-                        ]
-
-                        verified_matches = evaluator.evaluate(entries, is_info).selected
-                        logger.info("verified_matches_returned: %s" % (verified_matches,))
-                        if len(verified_matches) > 0:
-                            response = verification(verified_matches, is_info)
-                            logger.info("response: %s" % (response,))
+                            queued_count += 1
+                            continue
+                        elif rsschecker:
+                            if not [x for x in rss_queue if result["IssueID"] == x[8]]:
+                                sqlquery_name = re.sub(r"[\:\-]", "%", comic["ComicName"]).strip()
+                                rss_queue.append(
+                                    (
+                                        comic["ComicName"],
+                                        sqlquery_name,
+                                        result["Issue_Number"],
+                                        ComicYear,
+                                        SeriesYear,
+                                        Publisher,
+                                        IssueDate,
+                                        StoreDate,
+                                        result["IssueID"],
+                                        AlternateSearch,
+                                        UseFuzzy,
+                                        ComicVersion,
+                                        result["SARC"],
+                                        result["IssueArcID"],
+                                        result["mode"],
+                                        rsschecker,
+                                        result["ComicID"],
+                                        Comicname_filesafe,
+                                        AllowPacks,
+                                        OneOff,
+                                        TorrentID_32p,
+                                        DigitalDate,
+                                        booktype,
+                                        ignore_booktype,
+                                    )
+                                )
+                        else:
+                            logger.fdebug(
+                                "[TIER2] %s #%s [%s < %s]"
+                                % (comicname, result["Issue_Number"], DateAdded, comicarr.SEARCH_TIER_DATE)
+                            )
+                            continue
 
                     except Exception as err:
+                        error_count += 1
                         exc_type, exc_value, exc_tb = sys.exc_info()
                         filename, line_num, func_name, err_text = traceback.extract_tb(exc_tb)[-1]
                         tracebackline = traceback.format_exc()
 
                         except_line = {
+                            "exc_type": exc_type,
                             "exc_value": exc_value,
                             "exc_tb": exc_tb,
                             "filename": filename,
@@ -2487,11 +2341,11 @@ def searchforissue(
                             "err_text": err_text,
                             "traceback": tracebackline,
                             "comicname": comicname,
-                            "issuenumber": issue_number,
-                            "seriesyear": seriesyear,
-                            "issueid": issueid,
-                            "comicid": comicid,
-                            "mode": searchmode,
+                            "issuenumber": result["Issue_Number"],
+                            "seriesyear": SeriesYear,
+                            "issueid": result["IssueID"],
+                            "comicid": result["ComicID"],
+                            "smode": smode,
                             "booktype": booktype,
                         }
 
@@ -2500,19 +2354,251 @@ def searchforissue(
                         logger.exception(tracebackline)
                         continue
 
-                logger.info("Completed RSS Search scan")
-                if comicarr.SEARCHLOCK.locked():
-                    comicarr.SEARCHLOCK.release()
-            else:
-                logger.info("Completed Queueing API Search scan")
-                if comicarr.SEARCHLOCK.locked():
-                    comicarr.SEARCHLOCK.release()
-                return {
-                    "status": "QUEUED",
-                    "queued_count": queued_count,
-                    "error_count": error_count,
-                    "run_id": acquisition_run_id,
-                }
+                if rsschecker:
+                    provider_list = provider_order()
+                    if all(
+                        [comicarr.CONFIG.ENABLE_TORRENTS is True, comicarr.CONFIG.ENABLE_TORRENT_SEARCH is True]
+                    ) or (
+                        any(
+                            [
+                                comicarr.CONFIG.EXPERIMENTAL is True,
+                                comicarr.CONFIG.ENABLE_GETCOMICS is True,
+                                comicarr.CONFIG.ENABLE_EXTERNAL_SERVER is True,
+                            ]
+                        )
+                        or all([comicarr.CONFIG.NEWZNAB is True, len(ens) > 0])
+                        and any(
+                            [
+                                comicarr.USE_SABNZBD is True,
+                                comicarr.USE_NZBGET is True,
+                                comicarr.USE_BLACKHOLE is True,
+                            ]
+                        )
+                        or all([comicarr.CONFIG.TORZNAB is True, len(ens) > 0])
+                        and any(
+                            [comicarr.CONFIG.ENABLE_TORRENTS is True, comicarr.CONFIG.ENABLE_TORRENT_SEARCH is True]
+                        )
+                    ):
+                        results = comicarr.rsscheck.nzbdbsearch(
+                            None, None, rsslist=rss_queue, provider_list=provider_list
+                        )
+                    for x in results["entries"]:
+                        rs = {}
+                        rs["entries"] = [
+                            {
+                                "title": x["title"],
+                                "link": x["link"],
+                                "pubdate": x["pubdate"],
+                                "site": x["site"],
+                                "length": x["length"],
+                            }
+                        ]
+
+                        logger.info(_rss_result_log_summary(x))
+                        try:
+                            foundc = {}
+                            foundc["status"] = False
+                            foundc["provider"] = x["site"]
+
+                            xr = x["info"]
+                            comicname = xr["ComicName"]
+                            issue_number = xr["Issue_Number"]
+                            seriesyear = xr["SeriesYear"]
+                            comicid = xr["ComicID"]
+                            issueid = xr["IssueID"]
+                            booktype = xr["booktype"]
+                            searchmode = xr["searchmode"]
+
+                            current_prov = last_run_check(check=True, provider=x["site"])
+                            logger.fdebug("current_prov: %s" % (current_prov,))
+                            if len(current_prov) > 0:
+                                nzbprov = list(current_prov.keys())[0]
+                                provider_stat = current_prov.get(list(current_prov.keys())[0])
+                            else:
+                                nzbprov = x["site"]
+                            foundc["lastrun"] = provider_stat["lastrun"]
+                            logger.fdebug("nzbprov: %s" % nzbprov)
+                            logger.fdebug("provider_stat: %s" % (provider_stat,))
+
+                            newznab_info = None
+                            torznab_info = None
+                            if provider_stat["type"] == "newznab":
+                                if provider_list["newznab_info"]:
+                                    pni = provider_list["newznab_info"]
+                                    for pl in pni:
+                                        if pl["info"][0] == nzbprov:
+                                            logger.fdebug("newznab match: %s" % nzbprov)
+                                            newznab_info = pl["info"]
+                                            break
+
+                            elif provider_stat["type"] == "torznab":
+                                if provider_list["torznab_info"]:
+                                    pni = provider_list["torznab_info"]
+                                    for pl in pni:
+                                        if pl["info"][0] == nzbprov:
+                                            logger.fdebug("torznab match: %s" % nzbprov)
+                                            torznab_info = pl["info"]
+                                            break
+
+                            IssDateFix = "no"
+                            if xr["IssueDate"] is not None:
+                                IssDt = xr["IssueDate"][5:7]
+                                if any([IssDt == "12", IssDt == "11", IssDt == "01", IssDt == "02", IssDt == "03"]):
+                                    IssDateFix = IssDt
+
+                            else:
+                                if xr["StoreDate"] is not None:
+                                    StDt = xr["StoreDate"][5:7]
+                                    if any(
+                                        [
+                                            StDt == "10",
+                                            StDt == "12",
+                                            StDt == "11",
+                                            StDt == "01",
+                                            StDt == "02",
+                                            StDt == "03",
+                                        ]
+                                    ):
+                                        IssDateFix = StDt
+
+                            chktpb = 0
+                            if any([booktype == "TPB", booktype == "HC", booktype == "GN"]):
+                                chktpb = 1
+
+                            logger.fdebug("provider order: %s" % provider_list["prov_order"])
+
+                            intIss = helpers.issuedigits(xr["Issue_Number"])
+
+                            findcomiciss, c_number = get_findcomiciss(xr["Issue_Number"])
+
+                            if "0-Day" in comicname:
+                                cmloopit = 1
+                            else:
+                                cmloopit = None
+                                if any([booktype == "One-Shot", "annual" in comicname.lower()]):
+                                    cmloopit = 4
+                                    if "annual" in comicname.lower():
+                                        if xr["Issue_Number"] is not None:
+                                            if helpers.issuedigits(xr["Issue_Number"]) != 1000:
+                                                cmloopit = None
+                                if cmloopit is None:
+                                    if len(c_number) == 1:
+                                        cmloopit = 3
+                                    elif len(c_number) == 2:
+                                        cmloopit = 2
+                                    else:
+                                        cmloopit = 1
+
+                            is_info = {
+                                "ComicName": xr["ComicName"],
+                                "nzbprov": nzbprov,
+                                "RSS": xr["RSS"],
+                                "UseFuzzy": xr["UseFuzzy"],
+                                "StoreDate": xr["StoreDate"],
+                                "IssueDate": xr["IssueDate"],
+                                "digitaldate": xr["DigitalDate"],
+                                "booktype": xr["booktype"],
+                                "ignore_booktype": xr["ignore_booktype"],
+                                "SeriesYear": xr["SeriesYear"],
+                                "ComicVersion": xr["ComicVersion"],
+                                "IssDateFix": IssDateFix,
+                                "ComicYear": xr["ComicYear"],
+                                "IssueID": xr["IssueID"],
+                                "ComicID": xr["ComicID"],
+                                "IssueNumber": xr["Issue_Number"],
+                                "manual": False,
+                                "newznab_host": newznab_info,
+                                "torznab_host": torznab_info,
+                                "oneoff": xr["OneOff"],
+                                "tmpprov": nzbprov,
+                                "SARC": xr["SARC"],
+                                "IssueArcID": xr["IssueArcID"],
+                                "cmloopit": cmloopit,
+                                "findcomiciss": findcomiciss,
+                                "intIss": intIss,
+                                "chktpb": chktpb,
+                                "smode": xr["searchmode"],
+                                "provider_stat": provider_stat,
+                                "allow_packs": (
+                                    xr["AllowPacks"] in (1, "1", True) and comicarr.CONFIG.ENABLE_TORRENT_SEARCH
+                                ),
+                                "foundc": foundc,
+                            }
+
+                            logger.info(
+                                "looking for : %s %s (%s) [oneoff: %s][ignore_booktype: %s]"
+                                % (
+                                    xr["ComicName"],
+                                    xr["Issue_Number"],
+                                    xr["StoreDate"],
+                                    xr["OneOff"],
+                                    xr["ignore_booktype"],
+                                )
+                            )
+                            rs = {}
+
+                            entries = [
+                                {
+                                    "title": x["title"],
+                                    "link": x["link"],
+                                    "pubdate": x["pubdate"],
+                                    "site": x["site"],
+                                    "length": x["length"],
+                                    "pack": x["pack"],
+                                    "issues": x["issues"],
+                                }
+                            ]
+
+                            verified_matches = evaluator.evaluate(entries, is_info).selected
+                            logger.fdebug("verified_matches_returned: %s" % (verified_matches,))
+                            if len(verified_matches) > 0:
+                                response = verification(verified_matches, is_info)
+                                logger.fdebug("response: %s" % (response,))
+
+                        except Exception as err:
+                            exc_type, exc_value, exc_tb = sys.exc_info()
+                            filename, line_num, func_name, err_text = traceback.extract_tb(exc_tb)[-1]
+                            tracebackline = traceback.format_exc()
+
+                            except_line = {
+                                "exc_value": exc_value,
+                                "exc_tb": exc_tb,
+                                "filename": filename,
+                                "line_num": line_num,
+                                "func_name": func_name,
+                                "err": str(err),
+                                "err_text": err_text,
+                                "traceback": tracebackline,
+                                "comicname": comicname,
+                                "issuenumber": issue_number,
+                                "seriesyear": seriesyear,
+                                "issueid": issueid,
+                                "comicid": comicid,
+                                "mode": searchmode,
+                                "booktype": booktype,
+                            }
+
+                            helpers.log_that_exception(except_line)
+
+                            logger.exception(tracebackline)
+                            continue
+
+                    logger.info("Completed RSS Search scan")
+                    if rss_budget is not None:
+                        rss_budget.log_summary()
+                else:
+                    logger.info("Completed Queueing API Search scan")
+                    if comicarr.SEARCHLOCK.locked():
+                        comicarr.SEARCHLOCK.release()
+                    return {
+                        "status": "QUEUED",
+                        "queued_count": queued_count,
+                        "error_count": error_count,
+                        "run_id": acquisition_run_id,
+                    }
+            finally:
+                if backlog_held:
+                    release_pass()
         else:
             try:
                 comicarr.SEARCHLOCK.acquire()
@@ -4134,7 +4220,7 @@ def search_the_matrix(scarios):
 def gen_altnames(ComicName, AlternateSearch, filesafe, smode):
     if filesafe:
         if filesafe != ComicName and smode != "want_ann":
-            logger.info(
+            logger.fdebug(
                 "[SEARCH] Special Characters exist within Series Title. Enabling search-safe Name : %s" % filesafe
             )
             if AlternateSearch is None or AlternateSearch == "None":
@@ -4143,7 +4229,7 @@ def gen_altnames(ComicName, AlternateSearch, filesafe, smode):
                 AlternateSearch += "##" + filesafe
 
     if smode == "want_ann":
-        logger.info("Annual/Special issue search detected. Appending to issue #")
+        logger.fdebug("Annual/Special issue search detected. Appending to issue #")
 
         if all(
             [
@@ -4165,23 +4251,23 @@ def gen_altnames(ComicName, AlternateSearch, filesafe, smode):
     searchlist = []
     Altname = None
     ignore_previous = False
-    logger.info("AlternateSearch: %s" % AlternateSearch)
+    logger.fdebug("AlternateSearch: %s" % AlternateSearch)
     if AlternateSearch is not None and AlternateSearch != "None":
         altpriority = AlternateSearch.find("!!")
-        logger.info("altpriority: %s" % altpriority)
+        logger.fdebug("altpriority: %s" % altpriority)
         if altpriority != -1:
             altsplit = AlternateSearch.find("##", altpriority)
-            logger.info("altsplit: %s" % altsplit)
+            logger.fdebug("altsplit: %s" % altsplit)
             if altsplit == -1:
                 Altname = AlternateSearch[altpriority + 2 :]
             else:
                 Altname = AlternateSearch[altpriority + 2 : altsplit]
-            logger.info("Altname: %s" % Altname)
+            logger.fdebug("Altname: %s" % Altname)
             if helpers.filesafe(Altname).lower() == helpers.filesafe(ComicName).lower():
-                logger.info("Alternate search pattern is an exact match to previous query. Not recreating")
+                logger.fdebug("Alternate search pattern is an exact match to previous query. Not recreating")
                 ignore_previous = True
             else:
-                logger.info(
+                logger.fdebug(
                     "Alternate Search Priority enabled. Using %s before %s during queries" % (Altname, ComicName)
                 )
                 searchlist.append({"ComicName": Altname, "unaltered_ComicName": Altname})
@@ -4193,13 +4279,13 @@ def gen_altnames(ComicName, AlternateSearch, filesafe, smode):
         chkthealt = list(filter(None, re.split(r"[\!\!]+|[\#\#]+", AlternateSearch)))
         for AS_Alternate in chkthealt:
             if helpers.filesafe(AS_Alternate).lower() == helpers.filesafe(ComicName).lower():
-                logger.info("Alternate search pattern is an exact match to previous query. Not recreating")
+                logger.fdebug("Alternate search pattern is an exact match to previous query. Not recreating")
                 continue
             if Altname != AS_Alternate:
-                logger.info("Alternate Search pattern detected...re-adjusting to : %s" % AS_Alternate)
+                logger.fdebug("Alternate Search pattern detected...re-adjusting to : %s" % AS_Alternate)
                 searchlist.append({"ComicName": AS_Alternate, "unaltered_ComicName": AS_Alternate})
 
-    logger.info("searchlist: %s" % (searchlist,))
+    logger.fdebug("searchlist: %s" % (searchlist,))
     return searchlist
 
 

@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.41.4
+
+### Patch Changes
+
+- 1c98644: Search no longer fills the log with one Info line per provider and alternate name. At the default Info level you get one summary per issue, naming the providers and alternate names tried and whether it was found, and new installs keep 50 MB per log file so a few hours of history survive rotation. Set the log level to Debug (2) to see the per-provider and per-alternate-name lines again.
+
+## 0.41.3
+
+### Patch Changes
+
+- 33089d0: Direct downloads that were abandoned mid-transfer no longer sit in Downloading forever. Once a stuck download passes the stuck threshold and no download is running for it, Comicarr closes it out. A download it can't match to a snatch goes to Manual Review. A dead source link is marked Failed and the issue is searched again. A link that still works but stopped transferring is marked Failed and the issue goes back to Wanted. If the link can't be checked, the download is left alone and checked again later. The download that is running is never interrupted; Comicarr only notifies about it, once. Stuck notifications no longer repeat after a restart.
+
+## 0.41.2
+
+### Patch Changes
+
+- 1d86693: Scheduled manga RSS searches no longer pin a CPU core on large libraries. A manga series with no matching RSS entries is now skipped outright, and repeated RSS lookups for the same series run once per pass instead of once per chapter. The scheduled RSS watchlist scan now checks the Wanted list in bounded passes that resume where they left off, re-checks recent releases on every pass, and no longer blocks a manual search while it runs. Optional INI knobs `wanted_search_pass_items` (default 250) and `wanted_search_pass_seconds` (default 120) cap each watchlist pass; `0` disables that cap.
+
+## 0.41.1
+
+### Patch Changes
+
+- 7d1d36c: Series pages on a phone, in either orientation, now scroll past the cover and action buttons so the issue list is reachable. Long overviews stay in a short scrollable block instead of filling the window.
+
+## 0.41.0
+
+### Minor Changes
+
+- 9c4e042: Search results can now be shown as a grid of cover cards as well as the existing list. Use the list/grid toggle beside the Sort menu on the Search page. Each card shows the cover, year, issue or chapter count, publisher, source and an Add button. The choice is remembered for next time and applies to both comic and manga search.
+
+### Patch Changes
+
+- e06024c: Manga chapters now display in your preferred language. When more than one language is enabled in Settings → MangaDex, a chapter that exists in several languages no longer shows up (or gets overwritten) in a language you did not pick — Comicarr keeps the earliest language in your configured list and falls back to the others only for chapters that language does not have.
+
+## 0.40.1
+
+### Patch Changes
+
+- 5758047: Finishing the onboarding dialog on a new install now sticks. Before, the "Let's get your library set up" dialog came back on every page reload until the library had a series in it, because closing it was never saved.
+- 87d9476: Snatching an issue that is on this week's pull list no longer stops partway with an error. The pull list now shows it as Snatched, and then Downloaded once post-processing finishes, including one-off downloads.
+- 8c5f8b7: Comicarr no longer removes a SABnzbd download that is still unpacking or repairing when it stops waiting for it, so the job isn't cancelled and its files aren't deleted. "Remove failed" in SABnzbd settings now asks SABnzbd to delete files only for downloads that actually failed.
+- b1d7ff1: The weekly pull list no longer fails when a series you follow has an issue out that week. Those issues are matched to your series again, and with auto-want on they are marked Wanted.
+
 ## 0.40.0
 
 ### Minor Changes
